@@ -77,15 +77,20 @@ def main():
 
     ovf_handle = OvfHandler(args.ova_path)
 
+    prefix = "DG_"
+
+    hs = get_hs(si, dc, args.host)
+    host_network_system = hs.configManager.networkSystem
     ovfManager = si.content.ovfManager
     # CreateImportSpecParams can specify many useful things such as
     # diskProvisioning (thin/thick/sparse/etc)
     # networkMapping (to map to networks)
     # propertyMapping (descriptor specific properties)
-
     ovf_desc = ovfManager.ParseDescriptor(ovf_handle.get_descriptor(), vim.OvfManager.ParseDescriptorParams())
+    create_network(host_network_system, prefix, ovf_desc.network)
+
     cisp = vim.OvfManager.CreateImportSpecParams()
-    cisp.entityName = "DG_" + ovf_desc.defaultEntityName
+    cisp.entityName = prefix + ovf_desc.defaultEntityName
 
     cisr = ovfManager.CreateImportSpec(ovf_handle.get_descriptor(),
                                        rp, ds, cisp)
@@ -113,6 +118,53 @@ def main():
 
     print("Starting deploy...")
     return ovf_handle.upload_disks(lease, args.host)
+
+
+def create_vswitch(host_network_system, vss_name, num_ports):
+    vss_spec = vim.host.VirtualSwitch.Specification()
+    vss_spec.numPorts = num_ports
+    host_network_system.AddVirtualSwitch(vswitchName=vss_name, spec=vss_spec)
+    print("Successfully created vSwitch ",  vss_name)
+
+def create_port_group(host_network_system, pg_name, vss_name):
+    port_group_spec = vim.host.PortGroup.Specification()
+    port_group_spec.name = pg_name
+    port_group_spec.vlanId = 0
+    port_group_spec.vswitchName = vss_name
+
+    security_policy = vim.host.NetworkPolicy.SecurityPolicy()
+    security_policy.allowPromiscuous = True
+    security_policy.forgedTransmits = True
+    security_policy.macChanges = False
+
+    port_group_spec.policy = vim.host.NetworkPolicy(security=security_policy)
+
+    host_network_system.AddPortGroup(portgrp=port_group_spec)
+
+    print("Successfully created PortGroup ",  pg_name)
+
+def create_network(host_network_system, prefix, networks):
+    vss_name = prefix + "vSwitch"
+    create_vswitch(host_network_system, vss_name, 120)
+    for network in networks:
+        pg_name = prefix + network.name
+        create_port_group(host_network_system, pg_name, vss_name)
+
+def get_hs(si, dc, name):
+    """
+    Get a host system in the datacenter by its names.
+    """
+    viewManager = si.content.viewManager
+    containerView = viewManager.CreateContainerView(dc, [vim.HostSystem], True)
+    try:
+        for hs in containerView.view:
+            if hs.name == name:
+                return hs
+    finally:
+        containerView.Destroy()
+    raise Exception("Failed to find host system %s in datacenter %s" %
+                    (name, dc.name))
+
 
 
 def get_dc(si, name):
