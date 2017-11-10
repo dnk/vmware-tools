@@ -87,10 +87,10 @@ def main():
     # networkMapping (to map to networks)
     # propertyMapping (descriptor specific properties)
     ovf_desc = ovfManager.ParseDescriptor(ovf_handle.get_descriptor(), vim.OvfManager.ParseDescriptorParams())
-    create_network(host_network_system, prefix, ovf_desc.network)
 
     cisp = vim.OvfManager.CreateImportSpecParams()
     cisp.entityName = prefix + ovf_desc.defaultEntityName
+    cisp.networkMapping = create_network(dc, host_network_system, prefix, ovf_desc.network)
 
     cisr = ovfManager.CreateImportSpec(ovf_handle.get_descriptor(),
                                        rp, ds, cisp)
@@ -143,12 +143,19 @@ def create_port_group(host_network_system, pg_name, vss_name):
 
     print("Successfully created PortGroup ",  pg_name)
 
-def create_network(host_network_system, prefix, networks):
+def create_network(dc, host_network_system, prefix, networks):
     vss_name = prefix + "vSwitch"
     create_vswitch(host_network_system, vss_name, 120)
+    network_mapping = []
     for network in networks:
         pg_name = prefix + network.name
         create_port_group(host_network_system, pg_name, vss_name)
+        network_map = vim.OvfManager.NetworkMapping()
+        network_map.name = network.name
+        network_map.network = get_network(dc, pg_name)
+        network_mapping.append(network_map)
+
+    return network_mapping
 
 def get_hs(si, dc, name):
     """
@@ -176,6 +183,13 @@ def get_dc(si, name):
             return dc
     raise Exception('Failed to find datacenter named %s' % name)
 
+
+def get_network(dc, name):
+    for network in dc.networkFolder.childEntity:
+        if network.name == name:
+            return network
+
+    raise Exception('Failed to find network named %s' % name)
 
 def get_rp(si, dc, name):
     """
