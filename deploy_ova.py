@@ -82,7 +82,11 @@ def main():
     # diskProvisioning (thin/thick/sparse/etc)
     # networkMapping (to map to networks)
     # propertyMapping (descriptor specific properties)
+
+    ovf_desc = ovfManager.ParseDescriptor(ovf_handle.get_descriptor(), vim.OvfManager.ParseDescriptorParams())
     cisp = vim.OvfManager.CreateImportSpecParams()
+    cisp.entityName = "DG_" + ovf_desc.defaultEntityName
+
     cisr = ovfManager.CreateImportSpec(ovf_handle.get_descriptor(),
                                        rp, ds, cisp)
 
