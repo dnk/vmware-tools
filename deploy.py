@@ -36,6 +36,8 @@ def setup_args():
     parser = cli.build_arg_parser()
     parser.add_argument('--ova-path',
                         help='Path to the OVA file, can be local or a URL.')
+    parser.add_argument('--ovf-path',
+                        help='Path to the OVF file, can be local or a URL.')
     parser.add_argument('-d', '--datacenter',
                         help='Name of datacenter to search on. '
                              'Defaults to first.')
@@ -75,9 +77,15 @@ def main():
     else:
         ds = get_largest_free_ds(dc)
 
-    ovf_handle = OvfHandler(args.ova_path)
+    if args.ova_path:
+        handle = OvaHandler(args.ova_path)
+    elif args.ovf_path:
+        handle = OvfHandler(args.ovf_path)
+    else:
+        print("no luck")
+        exit(1)
 
-    prefix = "DG_"
+    prefix = "R3_"
 
     hs = get_hs(si, dc, args.host)
     host_network_system = hs.configManager.networkSystem
@@ -86,13 +94,13 @@ def main():
     # diskProvisioning (thin/thick/sparse/etc)
     # networkMapping (to map to networks)
     # propertyMapping (descriptor specific properties)
-    ovf_desc = ovfManager.ParseDescriptor(ovf_handle.get_descriptor(), vim.OvfManager.ParseDescriptorParams())
+    ovf_desc = ovfManager.ParseDescriptor(handle.get_descriptor(), vim.OvfManager.ParseDescriptorParams())
 
     cisp = vim.OvfManager.CreateImportSpecParams()
     cisp.entityName = prefix + ovf_desc.defaultEntityName
-    cisp.networkMapping = create_network(dc, host_network_system, prefix, ovf_desc.network)
+    cisp.networkMapping = create_network(hs, dc, host_network_system, prefix, ovf_desc.network)
 
-    cisr = ovfManager.CreateImportSpec(ovf_handle.get_descriptor(),
+    cisr = ovfManager.CreateImportSpec(handle.get_descriptor(),
                                        rp, ds, cisp)
 
     # These errors might be handleable by supporting the parameters in
@@ -103,7 +111,7 @@ def main():
             print("%s" % error)
         return 1
 
-    ovf_handle.set_spec(cisr)
+    handle.set_spec(cisr)
 
     lease = rp.ImportVApp(cisr.importSpec, dc.vmFolder)
     while lease.state == vim.HttpNfcLease.State.initializing:
@@ -117,42 +125,53 @@ def main():
         return 0
 
     print("Starting deploy...")
-    return ovf_handle.upload_disks(lease, args.host)
+    return handle.upload_disks(lease, args.host)
 
 
-def create_vswitch(host_network_system, vss_name, num_ports):
-    vss_spec = vim.host.VirtualSwitch.Specification()
-    vss_spec.numPorts = num_ports
-    host_network_system.AddVirtualSwitch(vswitchName=vss_name, spec=vss_spec)
-    print("Successfully created vSwitch ",  vss_name)
+def create_vswitch(hs, host_network_system, vss_name, num_ports):
+    if not filter(lambda vsw: vsw.name == vss_name, hs.config.network.vswitch):
+        vss_spec = vim.host.VirtualSwitch.Specification()
+        vss_spec.numPorts = num_ports
+        host_network_system.AddVirtualSwitch(vswitchName=vss_name, spec=vss_spec)
+        print("Successfully created vSwitch ",  vss_name)
+    else:
+        print("vSwitch '%s' already exists" % vss_name)
 
 def create_port_group(host_network_system, pg_name, vss_name):
-    port_group_spec = vim.host.PortGroup.Specification()
-    port_group_spec.name = pg_name
-    port_group_spec.vlanId = 0
-    port_group_spec.vswitchName = vss_name
+    try:
+        port_group_spec = vim.host.PortGroup.Specification()
+        port_group_spec.name = pg_name
+        port_group_spec.vlanId = 0
+        port_group_spec.vswitchName = vss_name
 
-    security_policy = vim.host.NetworkPolicy.SecurityPolicy()
-    security_policy.allowPromiscuous = True
-    security_policy.forgedTransmits = True
-    security_policy.macChanges = False
+        security_policy = vim.host.NetworkPolicy.SecurityPolicy()
+        security_policy.allowPromiscuous = True
+        security_policy.forgedTransmits = True
+        security_policy.macChanges = False
 
-    port_group_spec.policy = vim.host.NetworkPolicy(security=security_policy)
+        port_group_spec.policy = vim.host.NetworkPolicy(security=security_policy)
 
-    host_network_system.AddPortGroup(portgrp=port_group_spec)
+        host_network_system.AddPortGroup(portgrp=port_group_spec)
 
-    print("Successfully created PortGroup ",  pg_name)
+        print("Successfully created PortGroup ",  pg_name)
+    except vim.fault.AlreadyExists, e:
+        print("Failed to create PortGroup '%s'" % pg_name, e.msg)
 
-def create_network(dc, host_network_system, prefix, networks):
+def create_network(hs, dc, host_network_system, prefix, networks):
     vss_name = prefix + "vSwitch"
-    create_vswitch(host_network_system, vss_name, 120)
+    create_vswitch(hs, host_network_system, vss_name, 120)
     network_mapping = []
     for network in networks:
         pg_name = prefix + network.name
-        create_port_group(host_network_system, pg_name, vss_name)
+        net = get_network(dc, pg_name)
+        if not net:
+            create_port_group(host_network_system, pg_name, vss_name)
+            network = get_network(dc, pg_name)
+        else:
+            print("PortGroup '%s' already exists" % pg_name)
         network_map = vim.OvfManager.NetworkMapping()
         network_map.name = network.name
-        network_map.network = get_network(dc, pg_name)
+        network_map.network = net
         network_mapping.append(network_map)
 
     return network_mapping
@@ -189,7 +208,7 @@ def get_network(dc, name):
         if network.name == name:
             return network
 
-    raise Exception('Failed to find network named %s' % name)
+    return None
 
 def get_rp(si, dc, name):
     """
@@ -277,6 +296,119 @@ def get_tarfile_size(tarfile):
 class OvfHandler(object):
     """
     OvfHandler handles most of the OVA operations.
+    It processes the tarfile, matches disk keys to files and
+    uploads the disks, while keeping the progress up to date for the lease.
+    """
+    def __init__(self, ovf_path):
+        """
+        Performs necessary initialization, opening the OVF file,
+        processing the files and reading the embedded ovf file.
+        """
+        self.ovf_path = ovf_path
+        with open(ovf_path, 'r') as f:
+            self.descriptor = f.read()
+
+    def get_descriptor(self):
+        return self.descriptor
+
+    def set_spec(self, spec):
+        """
+        The import spec is needed for later matching disks keys with
+        file names.
+        """
+        self.spec = spec
+
+    def get_disk(self, fileItem, lease):
+        """
+        Does translation for disk key to file name, returning a file handle.
+        """
+        return os.path.dirname(self.ovf_path) + "/" + fileItem.path
+
+    def get_device_url(self, fileItem, lease):
+        for deviceUrl in lease.info.deviceUrl:
+            if deviceUrl.importKey == fileItem.deviceId:
+                return deviceUrl
+        raise Exception("Failed to find deviceUrl for file %s" % fileItem.path)
+
+    def upload_disks(self, lease, host):
+        """
+        Uploads all the disks, with a progress keep-alive.
+        """
+        self.lease = lease
+        try:
+            self.start_timer()
+            for fileItem in self.spec.fileItem:
+                self.upload_disk(fileItem, lease, host)
+            lease.Complete()
+            print("Finished deploy successfully.")
+            return 0
+        except vmodl.MethodFault as e:
+            print("Hit an error in upload: %s" % e)
+            lease.Abort(e)
+        except Exception as e:
+            print("Lease: %s" % lease.info)
+            print("Hit an error in upload: %s" % e)
+            lease.Abort(vmodl.fault.SystemError(reason=str(e)))
+            raise
+        return 1
+
+    def upload_disk(self, fileItem, lease, host):
+        """
+        Upload an individual disk. Passes the file handle of the
+        disk directly to the urlopen request.
+        """
+        filename = self.get_disk(fileItem, lease)
+        if filename is None:
+            return
+        deviceUrl = self.get_device_url(fileItem, lease)
+        url = deviceUrl.url.replace('*', host)
+        headers = {'Content-length': os.path.getsize(filename)}
+        if hasattr(ssl, '_create_unverified_context'):
+            sslContext = ssl._create_unverified_context()
+        else:
+            sslContext = None
+
+        print ("Uploading disk: %s" % filename)
+        self.handle = FileHandle(filename)
+
+        req = Request(url, self.handle, headers)
+        urlopen(req, context=sslContext)
+
+    def start_timer(self):
+        """
+        A simple way to keep updating progress while the disks are transferred.
+        """
+        Timer(5, self.timer).start()
+
+    def timer(self):
+        """
+        Update the progress and reschedule the timer if not complete.
+        """
+        try:
+            found = False
+            offset = self.handle.offset
+            total = 0
+
+            for fileItem in self.spec.fileItem:
+                total += fileItem.size
+                found = found or fileItem.path == os.path.basename(self.handle.filename)
+
+                if not found:
+                    offset += fileItem.size
+
+            prog = int(100.0 * offset/total)
+            self.lease.Progress(prog)
+            if self.lease.state not in [vim.HttpNfcLease.State.done,
+                                        vim.HttpNfcLease.State.error]:
+                self.start_timer()
+            sys.stderr.write("Progress: %d%%  (%d/%d)\r" % (prog, offset, total))
+        except:  # Any exception means we should stop updating progress.
+            pass
+
+
+class OvaHandler(object):
+    """
+    OvaHandler handles most of the OVA operations.
     It processes the tarfile, matches disk keys to files and
     uploads the disks, while keeping the progress up to date for the lease.
     """
