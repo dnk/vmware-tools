@@ -166,7 +166,7 @@ def create_network(hs, dc, host_network_system, prefix, networks):
         net = get_network(dc, pg_name)
         if not net:
             create_port_group(host_network_system, pg_name, vss_name)
-            network = get_network(dc, pg_name)
+            net = get_network(dc, pg_name)
         else:
             print("PortGroup '%s' already exists" % pg_name)
         network_map = vim.OvfManager.NetworkMapping()
