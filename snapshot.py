@@ -87,15 +87,17 @@ def create_snapshot(si, stack_name, name, description):
 def list_snapshots(si, stack_name):
     vms = filter(lambda vm: vm.name.startswith(stack_name), get_vms(si))
     for vm in vms:
+        currentSnapshotTree = _get_vm_snapshot_recursively(vm.snapshot.rootSnapshotList, lambda snapshotTree: snapshotTree.snapshot == vm.snapshot.currentSnapshot)
+        print ("'%s' current snapshot '%s'" % (vm.name, currentSnapshotTree.name))
         for rootSnapshot in vm.snapshot.rootSnapshotList:
-            pptree.print_tree(rootSnapshot, "childSnapshotList", "name")
+            pptree.print_tree(rootSnapshot, "childSnapshotList", "name", last="down")
 
-def _get_vm_snapshot_recursively(snapshots, snapshot_name):
+def _get_vm_snapshot_recursively(snapshots, matcher):
     for snapshot in snapshots:
-        if snapshot.name == snapshot_name:
+        if matcher(snapshot):
             return snapshot
         else:
-            childSnapshot = _get_vm_snapshot_recursively(snapshot.childSnapshotList, snapshot_name)
+            childSnapshot = _get_vm_snapshot_recursively(snapshot.childSnapshotList, matcher)
             if childSnapshot:
                 return childSnapshot
 
@@ -105,7 +107,7 @@ def switch_to_snapshot(si, stack_name, snapshot_name):
     vms = filter(lambda vm: vm.name.startswith(stack_name), get_vms(si))
     tasks = []
     for vm in vms:
-        snapshotTree = _get_vm_snapshot_recursively(vm.snapshot.rootSnapshotList, snapshot_name)
+        snapshotTree = _get_vm_snapshot_recursively(vm.snapshot.rootSnapshotList, lambda snapshotTree: snapshotTree.name == snapshot_name)
         if snapshotTree:
             print ("Switching %s to %s" % (vm.name, snapshot_name))
             tasks.append(snapshotTree.snapshot.RevertToSnapshot_Task())
