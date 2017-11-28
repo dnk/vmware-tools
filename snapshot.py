@@ -117,6 +117,20 @@ def switch_to_snapshot(si, stack_name, snapshot_name):
     for task in tasks:
         WaitForTask(task)
 
+def remove_snapshot(si, stack_name, snapshot_name):
+    vms = filter(lambda vm: vm.name.startswith(stack_name), get_vms(si))
+    tasks = []
+    for vm in vms:
+        snapshotTree = _get_vm_snapshot_recursively(vm.snapshot.rootSnapshotList, lambda snapshotTree: snapshotTree.name == snapshot_name)
+        if snapshotTree:
+            print ("Removing shapshot %s for %s" % (snapshot_name, vm.name))
+            tasks.append(snapshotTree.snapshot.RemoveSnapshot_Task(removeChildren=False, consolidate=True))
+        else:
+            print ("%s have no snapshot %s" % (vm.name, snapshot_name))
+
+    for task in tasks:
+        WaitForTask(task)
+
 
 if __name__ == "__main__":
     args = setup_args()
@@ -140,5 +154,7 @@ if __name__ == "__main__":
         list_snapshots(si, args.stack_name)
     elif args.action == Actions.SWITCH:
         switch_to_snapshot(si, args.stack_name, args.name)
+    elif args.action == Actions.REMOVE:
+        remove_snapshot(si, args.stack_name, args.name)
     else:
         exit(1)
