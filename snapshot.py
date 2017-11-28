@@ -107,7 +107,7 @@ def switch_to_snapshot(si, stack_name, snapshot_name):
     vms = filter(lambda vm: vm.name.startswith(stack_name), get_vms(si))
     tasks = []
     for vm in vms:
-        snapshotTree = _get_vm_snapshot_recursively(vm.snapshot.rootSnapshotList, lambda snapshotTree: snapshotTree.name == snapshot_name)
+        snapshotTree = _get_vm_snapshot_recursively(vm.snapshot.rootSnapshotList, lambda snapshotTree: snapshotTree.name == snapshot_name) if vm.snapshot else None
         if snapshotTree:
             print ("Switching %s to %s" % (vm.name, snapshot_name))
             tasks.append(snapshotTree.snapshot.RevertToSnapshot_Task())
