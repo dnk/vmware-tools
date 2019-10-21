@@ -5,4 +5,4 @@ pptree==2.0
 pyvmomi==6.5.0.2017.5.post1
 requests==2.18.4
 six==1.11.0
-urllib3==1.23
+urllib3==1.24.2
